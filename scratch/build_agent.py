@@ -1104,6 +1104,43 @@ def _e279_selected_expert(obs):
     return str(state.get("expert") or "low")
 
 
+def _v17_idle_fertilizer_liquidation(obs, action, step):
+    hour = step % 24
+    if hour != 23:
+        return action
+    market = action.get("market", [])
+    if len(market) >= 10:
+        return action
+    private = _get(obs, "private", {}) or {}
+    shed = _get(private, "shed", {}) or {}
+    fertilizer_in_shed = int(_get(shed, "FERTILIZER", 0) or 0)
+    if fertilizer_in_shed <= 0:
+        return action
+    market_state = _get(obs, "market", {}) or {}
+    prices = _get(market_state, "prices", {}) or {}
+    fertilizer_price = float(_get(prices, "FERTILIZER", 100) or 0)
+    if fertilizer_price >= 100:
+        existing_sell = sum(
+            int(order[2]) for order in market 
+            if len(order) >= 3 and order[0] == "SELL" and order[1] == "FERTILIZER"
+        )
+        sellable = max(0, fertilizer_in_shed - existing_sell)
+        quantity = min(12, sellable)
+        if quantity > 0:
+            action = _copy_action(action)
+            market = [list(order) for order in action.get("market", []) or []]
+            existing = next(
+                (order for order in market if len(order) >= 3 and order[0] == "SELL" and order[1] == "FERTILIZER"),
+                None
+            )
+            if existing is not None:
+                existing[2] = int(existing[2] or 0) + quantity
+            elif len(market) < 10:
+                market.append(["SELL", "FERTILIZER", quantity])
+            action["market"] = market[:10]
+    return action
+
+
 def agent(obs, configuration=None):
     del configuration
     global _ACTIONS
@@ -1113,7 +1150,6 @@ def agent(obs, configuration=None):
         step = min(max(0, int(_get(obs, "step", 0) or 0)), len(_ACTIONS) - 1)
         action = _weed_repair_action(obs, _copy_action(_ACTIONS[step]), step)
         action = _v17_feed_guard(obs, action, step)
-        action = _v17_water_guard(obs, action, step)
         action = _v17_room_evac(obs, action, step)
         action = _repay_shift(obs, action, step)
         action = _rank_sell_slots(obs, action, None)
@@ -1121,6 +1157,7 @@ def agent(obs, configuration=None):
         action = _v17_r5_counter(obs, action, step)
         action = _v17_md_counter(obs, action, step)
         action = _v17_room_guard(obs, action, step)
+        action = _v17_idle_fertilizer_liquidation(obs, action, step)
         action = _terminal_liquidation(obs, action, step)
         return _align_hands(action, obs)
     except Exception:
