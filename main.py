@@ -1,4 +1,3 @@
-# Kaggriculture Agent v7 - Enhanced Consensus Replay with Active Guards
 """BL-MDgogo-10C4S-R0: public-replay consensus route with generic execution guards.
 
 This is a behavioral reconstruction from twelve public traces, not either
@@ -51,8 +50,8 @@ _SHIFT_STATE = {
 _PREEMPT_ENABLED = True
 _PREEMPT_FRACTION = 2.0
 _PREEMPT_MAX_BATCH = 30
-_PREEMPT_MAX_CLONE_DISTANCE = 12
-_PREEMPT_MIN_PRICE_RATIO = 0.3
+_PREEMPT_MAX_CLONE_DISTANCE = 6
+_PREEMPT_MIN_PRICE_RATIO = 0.0
 _PREEMPT_MIN_FUTURE_QUANTITY = 4
 _PREEMPT_START = 120
 _PREEMPT_STOP = 680
@@ -570,7 +569,7 @@ _V17_MD_MARKETS = json.loads(zlib.decompress(base64.b85decode(
 )).decode("utf-8"))
 _V17_MD_FRACTION = 2.0
 _V17_ROOM_GUARD = True
-_V17_FEED_GUARD = True
+_V17_FEED_GUARD = False
 _V17_MD_ITEMS = ("MELON", "MILK", "STRAWBERRY", "WOOL")
 _V17_MD_STATE = {
     0: {"last_step": -1, "target": False},
@@ -667,50 +666,18 @@ def _v17_md_counter(obs, action, step):
     return action
 
 
-def _v17_move_toward(position, target, obs=None):
+def _v17_move_toward(position, target):
     x, y = int(position[0]), int(position[1])
     tx, ty = int(target[0]), int(target[1])
-    if x == tx and y == ty:
-        return ["PASS"]
-    # BFS pathfinding to avoid shed tiles and locked quadrants
-    import collections
-    q = collections.deque([((x, y), [])])
-    visited = {(x, y)}
-    shed = {(4, 4), (5, 4), (4, 5), (5, 5)}
-    # Determine unlocked quadrants from obs if available
-    unlocked = ["NW"]
-    if obs is not None:
-        try:
-            seat = _seat(obs)
-            farm = _farm(obs, seat)
-            unlocked = list(_get(farm, "unlocked_quadrants", ["NW"]) or ["NW"])
-        except Exception:
-            pass
-    def is_valid(px, py):
-        if not (0 <= px < 10 and 0 <= py < 10):
-            return False
-        if (px, py) in shed:
-            return False
-        qx, qy = px // 5, py // 5
-        if qx == 0 and qy == 0: return True
-        if qx == 1 and qy == 0 and "NE" in unlocked: return True
-        if qx == 0 and qy == 1 and "SW" in unlocked: return True
-        if qx == 1 and qy == 1 and "SE" in unlocked: return True
-        return False
-    while q:
-        pos, path = q.popleft()
-        if pos == (tx, ty):
-            return [path[0]] if path else ["PASS"]
-        cx, cy = pos
-        for dx, dy, d in [(0, -1, "NORTH"), (0, 1, "SOUTH"), (1, 0, "EAST"), (-1, 0, "WEST")]:
-            nx, ny = cx + dx, cy + dy
-            if (nx, ny) not in visited and is_valid(nx, ny):
-                visited.add((nx, ny))
-                q.append(((nx, ny), path + [d]))
-    # Fallback to simple manhattan
-    if abs(tx - x) >= abs(ty - y):
-        return ["EAST"] if tx > x else ["WEST"]
-    return ["SOUTH"] if ty > y else ["NORTH"]
+    if x < tx:
+        return ["EAST"]
+    if x > tx:
+        return ["WEST"]
+    if y < ty:
+        return ["SOUTH"]
+    if y > ty:
+        return ["NORTH"]
+    return ["PASS"]
 
 
 def _v17_feed_guard(obs, action, step):
@@ -755,7 +722,7 @@ def _v17_feed_guard(obs, action, step):
         if tuple(positions[actor]) == tuple(target):
             orders[actor] = ["FEED"]
         else:
-            orders[actor] = _v17_move_toward(positions[actor], target, obs)
+            orders[actor] = _v17_move_toward(positions[actor], target)
 
     claimed = {tuple(target) for target in active.values()}
     remaining_actions = max(1, 24 - hour)
@@ -787,7 +754,7 @@ def _v17_feed_guard(obs, action, step):
             continue
         active[actor] = list(target)
         claimed.add(target)
-        orders[actor] = ["FEED"] if distance == 0 else _v17_move_toward(positions[actor], target, obs)
+        orders[actor] = ["FEED"] if distance == 0 else _v17_move_toward(positions[actor], target)
     action["farmer"] = orders[0] if orders else ["PASS"]
     action["hands"] = orders[1:]
     return action
@@ -839,7 +806,7 @@ def _v17_room_evac(obs, action, step):
         state["active"] = None
         return action
     if tuple(positions[actor]) != target:
-        orders[actor] = _v17_move_toward(positions[actor], target, obs)
+        orders[actor] = _v17_move_toward(positions[actor], target)
     elif hour == 23:
         orders[actor] = ["DROP"]
         market = [list(order) for order in (action.get("market") or [])]
@@ -941,89 +908,11 @@ def _v17_room_guard(obs, action, step):
     action["market"] = market[:10]
     return action
 
-
-
-_V17_WATER_GUARD = True
-_V17_WATER_RESCUE_STATE = {
-    0: {"last_step": -1, "day": -1, "active": {}},
-    1: {"last_step": -1, "day": -1, "active": {}},
-}
-
-
-def _v17_water_guard(obs, action, step):
-    hour = int(_get(obs, "hour", 0) or 0)
-    day = int(_get(obs, "day", step // 24) or 0)
-    if not _V17_WATER_GUARD or hour < 18:
-        return action
-    action = _align_hands(action, obs)
-    seat = _seat(obs)
-    state = _V17_WATER_RESCUE_STATE[seat]
-    if step == 0 or step < int(state.get("last_step", -1)) or day != int(state.get("day", -1)):
-        state = {"last_step": step, "day": day, "active": {}}
-        _V17_WATER_RESCUE_STATE[seat] = state
-    state["last_step"] = step
-    farm = _farm(obs, seat)
-    positions = [_get(farm, "farmer", [4, 4]), *list(_get(farm, "hands", []) or [])]
-    orders = [action.get("farmer", ["PASS"]), *list(action.get("hands") or [])]
-    threats = []
-    for y, row in enumerate(list(_get(farm, "tiles", []) or [])):
-        for x, tile in enumerate(list(row or [])):
-            if (
-                isinstance(tile, dict)
-                and tile.get("kind") == "PLANT"
-                and int(tile.get("consecutive_unwatered", 0) or 0) >= 1
-                and not tile.get("watered_today", False)
-            ):
-                threats.append((x, y))
-    threat_set = set(threats)
-    active = state.setdefault("active", {})
-    for actor, target in list(active.items()):
-        actor = int(actor)
-        if actor >= len(positions) or tuple(target) not in threat_set:
-            active.pop(actor, None)
-            continue
-        if tuple(positions[actor]) == tuple(target):
-            orders[actor] = ["WATER"]
-        else:
-            orders[actor] = _v17_move_toward(positions[actor], target, obs)
-    claimed = {tuple(target) for target in active.values()}
-    remaining_actions = max(1, 24 - hour)
-    for target in threats:
-        if target in claimed:
-            continue
-        if any(
-            tuple(position) == target
-            and actor < len(orders)
-            and orders[actor]
-            and orders[actor][0] == "WATER"
-            for actor, position in enumerate(positions)
-        ):
-            continue
-        candidates = []
-        for actor, position in enumerate(positions):
-            if actor in active:
-                continue
-            distance = abs(int(position[0]) - target[0]) + abs(int(position[1]) - target[1])
-            if distance + 1 <= remaining_actions:
-                candidates.append((distance, actor))
-        if not candidates:
-            continue
-        distance, actor = min(candidates)
-        if distance + 1 < remaining_actions:
-            continue
-        active[actor] = list(target)
-        claimed.add(target)
-        orders[actor] = ["WATER"] if distance == 0 else _v17_move_toward(positions[actor], target, obs)
-    action["farmer"] = orders[0] if orders else ["PASS"]
-    action["hands"] = orders[1:]
-    return action
-
 def agent(obs):
     try:
         step = min(max(0, int(_get(obs, "step", 0) or 0)), len(_ACTIONS) - 1)
         action = _weed_repair_action(obs, _copy_action(_ACTIONS[step]), step)
         action = _v17_feed_guard(obs, action, step)
-        action = _v17_water_guard(obs, action, step)
         action = _v17_room_evac(obs, action, step)
         action = _repay_shift(obs, action, step)
         action = _rank_sell_slots(obs, action, None)
