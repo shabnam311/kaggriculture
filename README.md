@@ -1,31 +1,26 @@
-# Kaggriculture Agent v7 — Enhanced Consensus Replay
+# Kaggriculture Agent v9 — Sell-Lead Market Optimization
 
-A high-performing single-file Kaggriculture competition agent built from strategic insights across 5 top-scoring reference notebooks.
+A competitive single-file agent for the Kaggle Kaggriculture simulation competition.
 
-## Architecture
+## Key Strategic Enhancements in v9
 
-This agent uses the proven **Consensus Action-Replay** architecture (the same foundation behind 3,094+ score agents) but with **6 critical enhancements** drawn from analyzing `read-the-market-choose-the-farm`, `3094-score-kaggriculture`, `best-market-agent-high-strategy`, `rank-top10`, and `v16-rc5-r5a-high-score-8c-4s-recovery`:
+1. **Universal 1-Step Sell Lead (`_apply_lead_sale`)**:
+   - Inspired by the top-tier **Fieldbook** architecture (2.5k+), the agent anticipates planned sales from the upcoming step ($T+1$) and sells available inventory on the current step ($T$).
+   - Captures pre-drop market prices before scheduled bulk dumping occurs across the competition pool.
+   - Preserves trace stability by leading sales strictly without altering worker movement sequences.
 
-### Key Enhancements Over the Base Clone
+2. **Sell Suppression Mechanism (`_suppress_lead_sale`)**:
+   - Automatically tracks shifted sales and suppresses scheduled duplicate sale orders on step $T+1$, ensuring zero double-selling and keeping shed inventory balanced.
 
-1. **Clone Preemption Enabled** (`_PREEMPT_ENABLED = True`): When matched against the swarm of identical clones on the leaderboard, the agent front-runs their premium sell orders by 1 turn, capturing higher market prices before the clone crashes them. This is the #1 differentiator for climbing past 2k+.
+3. **Town Demand & Unlock Synchronization**:
+   - Automatically skips premature sell leads on town shop unlock turns (every 72 steps) and specialty demand intervals (every 4 steps), allowing prices to recover naturally.
 
-2. **Wider Clone Detection** (`_PREEMPT_MAX_CLONE_DISTANCE = 12`): The base agent only detects clones within distance 6. This version catches more clone variants that diverge slightly due to weed spawns or different shop unlocks.
+4. **Dynamic Demand-Dominance MoE**:
+   - Preserves dynamic branching at step 168 (High Wool/Sheep route if `YARN_STORE` unlocked vs Low Balanced Milk/Berry route).
 
-3. **Smart Preemption Guard** (`_PREEMPT_MIN_PRICE_RATIO = 0.3`): Prevents wasting shed inventory by preempting into markets where the price has already crashed below 30% of base value.
-
-4. **Feed Guard Enabled** (`_V17_FEED_GUARD = True`): Rescues starving animals at the last safe moment using JIT worker dispatch. Prevents losing high-value cows/sheep that took 15+ turns to set up.
-
-5. **Water Guard Added** (`_V17_WATER_GUARD = True`): Rescues dying crops with unwatered plants at the last safe moment. This was present in the v3 submission that scored 2.2k+ but was accidentally removed in later versions.
-
-6. **BFS Pathfinding** in guard movement: Workers now use breadth-first search to navigate around the central shed and locked quadrants instead of naive Manhattan movement, preventing workers from getting stuck on the shed tile.
+5. **Integrated Opponent Archetype Counters**:
+   - Active counters for R5 (Sheep rush) and MD (Cow rush) opponent families.
 
 ## How to Submit
 
-Upload `main.py` as a single file to the Kaggle competition. No zip or additional modules needed.
-
-## Local Testing
-
-```bash
-python test_h2h.py  # Runs 5 games against the base clone
-```
+Upload `main.py` directly to the Kaggle competition submission page.

@@ -915,6 +915,8 @@ def agent(obs):
         action = _v17_feed_guard(obs, action, step)
         action = _v17_room_evac(obs, action, step)
         action = _repay_shift(obs, action, step)
+        action = _suppress_lead_sale(action, obs, step)
+        action = _apply_lead_sale(obs, action, step)
         action = _rank_sell_slots(obs, action, None)
         action = _preempt_shift(obs, action, step)
         action = _v17_r5_counter(obs, action, step)
@@ -985,6 +987,87 @@ def _e279_selected_expert(obs):
         )
     return str(state.get("expert") or "low")
 
+
+
+_LEAD_SALE_STATE = {
+    0: {"last_step": -1, "due_step": -1, "suppress": {}},
+    1: {"last_step": -1, "due_step": -1, "suppress": {}},
+}
+
+
+def _suppress_lead_sale(action, obs, step):
+    seat = _seat(obs)
+    state = _LEAD_SALE_STATE[seat]
+    if state.get("due_step") != step:
+        return action
+    remaining = dict(state.get("suppress", {}))
+    kept = []
+    for order in action.get("market", []):
+        order = list(order)
+        if order and order[0] == "SELL" and len(order) >= 3 and remaining.get(order[1], 0) > 0:
+            item = order[1]
+            removed = min(max(0, int(order[2])), remaining[item])
+            order[2] -= removed
+            remaining[item] -= removed
+        if not order or order[0] != "SELL" or int(order[2]) > 0:
+            kept.append(order)
+    action["market"] = kept
+    return action
+
+
+def _apply_lead_sale(obs, action, step):
+    seat = _seat(obs)
+    state = _LEAD_SALE_STATE[seat]
+    if step == 0 or step < int(state.get("last_step", -1)):
+        state = {"last_step": step, "due_step": -1, "suppress": {}}
+        _LEAD_SALE_STATE[seat] = state
+    state["last_step"] = step
+
+    future_step = step + 1
+    if future_step >= len(_ACTIONS) or future_step >= 716:
+        return action
+
+    # Fieldbook rule: skip lead sale right before town shop unlocks (every 72 steps) or on demand ticks (every 4 steps)
+    if future_step % 72 == 0 or step % 4 == 0:
+        return action
+
+    projected = _projected_shed(obs, action)
+    prices = _get(_get(obs, "market", {}) or {}, "prices", {}) or {}
+
+    future_action = _ACTIONS[future_step]
+    planned = {}
+    for order in future_action.get("market", []):
+        if len(order) >= 3 and order[0] == "SELL":
+            item = order[1]
+            planned[item] = planned.get(item, 0) + max(0, int(order[2]))
+
+    already = {order[1] for order in action.get("market", []) if len(order) >= 2 and order[0] == "SELL"}
+    target_items = ("WOOL", "MELON", "MILK", "STRAWBERRY", "TOMATO", "CARROT")
+    suppress = {}
+    market = list(action.get("market", []))
+
+    for item in target_items:
+        if planned.get(item, 0) <= 0 or item in already:
+            continue
+        available = max(0, int(projected.get(item, 0) or 0))
+        target_qty = min(available, planned[item])
+        if target_qty <= 0:
+            continue
+        base_price = float(_MARKET_PARAMS.get(item, (1,))[0])
+        current_price = float(_get(prices, item, base_price) or base_price)
+        if current_price < base_price * 0.3:
+            continue
+        if len(market) >= 10:
+            break
+        market.append(["SELL", item, target_qty])
+        projected[item] = available - target_qty
+        suppress[item] = target_qty
+
+    if suppress:
+        action["market"] = market[:10]
+        state["due_step"] = future_step
+        state["suppress"] = suppress
+    return action
 
 def agent(obs, configuration=None):
     del configuration
