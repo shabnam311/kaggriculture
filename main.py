@@ -59,7 +59,7 @@ _SHIFT_STATE = {
     1: {"last_step": -1, "due_step": -1, "due": {}},
 }
 
-_PREEMPT_ENABLED = False
+_PREEMPT_ENABLED = True
 _PREEMPT_FRACTION = 2.0
 _PREEMPT_MAX_BATCH = 30
 _PREEMPT_MAX_CLONE_DISTANCE = 6
