@@ -252,15 +252,15 @@ def make_tasks(s):
             planted_count += 1
 
     # --- BUILD structures (scale with land owned) ---
-    if s.days_left >= 10 and s.money >= 600:
+    if s.days_left >= 10 and s.money >= 450:
         pastures = s.count_structs('PASTURE')
         coops = s.count_structs('COOP')
         target_past = len(s.qs) * 2
         target_coop = len(s.qs)
         if pastures < target_past and empties:
-            tasks.append((38, empties.pop(-1), ['BUILD_PASTURE'], 'build_past'))
+            tasks.append((60, empties.pop(-1), ['BUILD_PASTURE'], 'build_past'))
         if coops < target_coop and empties:
-            tasks.append((36, empties.pop(-1), ['BUILD_COOP'], 'build_coop'))
+            tasks.append((58, empties.pop(-1), ['BUILD_COOP'], 'build_coop'))
 
     # --- PLACE animals from inventory onto empty structures ---
     for i, inv in enumerate(s.invs):
@@ -282,7 +282,7 @@ def make_tasks(s):
             if s.shed.get(atype, 0) > 0:
                 struct = ANIMAL_STRUCT[atype]
                 if s.empty_structs(struct):
-                    tasks.append((58, shed_t[0], ['PICKUP', atype, 1], f'pu_{atype}'))
+                    tasks.append((85, shed_t[0], ['PICKUP', atype, 1], f'pu_{atype}'))
                     break
 
     # --- PICKUP wheat for feeding ---
@@ -316,7 +316,7 @@ def make_tasks(s):
     # --- DIG weeds ---
     for x, y, t in s.iter_tiles():
         if t.get('kind') == 'WEED':
-            tasks.append((25, (x, y), ['DIG'], 'dig'))
+            tasks.append((62, (x, y), ['DIG'], 'dig'))
 
     tasks.sort(key=lambda t: t[0], reverse=True)
     return tasks
@@ -435,18 +435,28 @@ def market_orders(s):
 
     # === 1. NON-SELL ORDERS (Buy, Hire, Land) ===
     if not liq:
-        # HIRE
+        # === TELEMETRY ===
+        if s.hour == 23:
+            n_weeds = sum(1 for _, _, t in s.iter_tiles() if t.get('kind') == 'WEED')
+            n_plants = s.count_plants()
+            n_pastures = s.count_structs('PASTURE')
+            n_coops = s.count_structs('COOP')
+            print(f"[Day {s.day:2d}] Money: ${budget:5.0f} | Hands: {len(s.hands)} | Quads: {len(s.qs)} | Plants: {n_plants} | Animals: {n_animals} | Weeds: {n_weeds} | Structs: {n_pastures}P/{n_coops}C")
+
+        # === HIRE ===
         if s.hour == 0 and s.days_left > 2:
-            cur = len(s.hands)
+            cur = len(s.hands)  # This is 0 at hour 0!
             n_plants = s.count_plants()
             total_seeds = sum(s.seeds.values())
-            workload = n_plants + n_animals * 3 + total_seeds
+            workload = n_plants + n_animals * 3 + total_seeds + (sum(1 for _, _, t in s.iter_tiles() if t.get('kind') == 'WEED') * 2)
+            # At least 1 worker on day 0-2, scale with workload after
             target = max(1 if s.day <= 2 else 0, workload // 8)
             target = min(target, len(s.qs) * 2 + 2)  # Scale hand cap with land (max 4 on 1 quad)
-            need = max(0, min(target - cur, 2))
+            need = target  # Removed the hard cap of 2 since cur is 0
+
             for i in range(need):
                 cost = _fib(s.hires_today + i)
-                if cost <= min(budget * 0.1, 100):
+                if cost <= min(budget * 0.2, 200): # Loosen the hire budget gate
                     orders.append(['HIRE'])
                     budget -= cost
 
@@ -473,7 +483,7 @@ def market_orders(s):
                         want -= buy
         
         # BUY ANIMALS
-        if s.days_left >= 10 and budget >= 500:
+        if s.days_left >= 10 and budget >= 400:
             ep = s.empty_structs('PASTURE')
             in_shed = sum(s.shed.get(a, 0) for a in ('COW','SHEEP','GOOSE'))
             carrying = any(isinstance(inv, dict) and any(inv.get(a,0)>0 for a in ('COW','SHEEP','GOOSE')) for inv in s.invs)
@@ -489,14 +499,14 @@ def market_orders(s):
                     roi = (price * harv - ANIMAL_COST[atype]) / s.days_left
                     if roi > best_roi:
                         best_roi, best_a = roi, atype
-                if best_a and budget >= ANIMAL_COST[best_a] * 1.3:
-                    n = min(len(ep), int(budget * 0.25 // ANIMAL_COST[best_a]))
+                if best_a and budget >= ANIMAL_COST[best_a] + 100:
+                    n = min(len(ep), int(budget // ANIMAL_COST[best_a])) # Use full budget for animals if ROI is good
                     if n > 0:
                         orders.append(['BUY_ANIMAL', best_a, n])
                         budget -= n * ANIMAL_COST[best_a]
 
             ec = s.empty_structs('COOP')
-            if ec and s.shed.get('GOOSE', 0) == 0 and budget >= 450:
+            if ec and s.shed.get('GOOSE', 0) == 0 and budget >= 300:
                 if s.days_left >= ANIMAL_YIELD_DAY['GOOSE'] + 2:
                     orders.append(['BUY_ANIMAL', 'GOOSE', min(len(ec), 1)])
                     budget -= 300
@@ -506,7 +516,7 @@ def market_orders(s):
             need = n_animals * 2 - s.shed.get('WHEAT', 0)
             wp = s.prices.get('WHEAT', 25)
             if need > 0 and wp <= 50 and budget >= wp * need:
-                buy = min(need, int(budget * 0.1 // max(wp, 1)))
+                buy = min(need, int(budget // max(wp, 1)))
                 if buy > 0:
                     orders.append(['BUY_PRODUCT', 'WHEAT', buy])
                     budget -= buy * wp
