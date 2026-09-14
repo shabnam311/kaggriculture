@@ -30,9 +30,9 @@ ANIMAL_INTERVAL = {'GOOSE': 1, 'COW': 2, 'SHEEP': 3}
 LAND_COST = [1000, 2000, 4000]
 SHED_CAP = 100
 
-# Fragile price items — sell in small batches
-SELL_CAP = {'MELON': 2, 'WOOL': 2, 'MILK': 3, 'STRAWBERRY': 3, 'EGG': 4,
-            'TOMATO': 4, 'CARROT': 5, 'WHEAT': 8, 'FERTILIZER': 5}
+# Fragile price items — sell in small batches to respect MAX_SELL_PER_TURN limits
+SELL_CAP = {'MELON': 1, 'WOOL': 2, 'MILK': 2, 'STRAWBERRY': 2, 'EGG': 5,
+            'TOMATO': 3, 'CARROT': 3, 'WHEAT': 10, 'FERTILIZER': 5}
 
 def _fib(n):
     a, b = 1, 1
@@ -175,13 +175,18 @@ def make_tasks(s):
     tasks = []
     shed_t = _shed_tiles(s.qs)
     empties = s.empty_tiles()
+    
+    # Sort empties by distance to center to roughly keep things tight
+    # Or ideally, sort dynamically. For now, closest to shed is better
+    if shed_t:
+        empties.sort(key=lambda p: min(_dist(p, st) for st in shed_t))
 
     # --- WATER (critical: unwatered plants die) ---
     for x, y, t in s.iter_tiles():
         if t.get('kind') == 'PLANT' and not t.get('watered_today', False):
             uw = t.get('consecutive_unwatered', 0)
             pri = 100 if uw >= 1 else 70
-            tasks.append((pri, (x, y), ['WATER'], 'water'))
+            tasks.append((pri + uw*5, (x, y), ['WATER'], 'water')) # Scale priority
 
     # --- FEED animals ---
     wheat_avail = s.total_wheat()
@@ -191,8 +196,19 @@ def make_tasks(s):
             uf = t.get('consecutive_unfed', 0)
             pri = 100 if uf >= 1 else 68
             if fed < wheat_avail:
-                tasks.append((pri, (x, y), ['FEED'], 'feed'))
+                tasks.append((pri + uf*5, (x, y), ['FEED'], 'feed')) # Scale priority
                 fed += 1
+
+    # --- FERTILIZE high value crops ---
+    fert_avail = s.shed.get('FERTILIZER', 0)
+    for inv in s.invs:
+        if isinstance(inv, dict): fert_avail += inv.get('FERTILIZER', 0)
+    fert_used = 0
+    for x, y, t in s.iter_tiles():
+        if t.get('kind') == 'PLANT' and t.get('crop') in ('MELON', 'STRAWBERRY', 'TOMATO'):
+            if not t.get('fertilized', False) and fert_used < fert_avail:
+                tasks.append((65, (x, y), ['FERTILIZE'], 'fertilize'))
+                fert_used += 1
 
     # --- HARVEST mature crops and animal products ---
     for x, y, t in s.iter_tiles():
@@ -222,30 +238,29 @@ def make_tasks(s):
             if s.day - placed >= yd:
                 tasks.append((80, (x, y), ['HARVEST'], 'harvest_a'))
 
-    # --- PLANT seeds (sorted by proximity to each worker) ---
+    # --- PLANT seeds ---
     best_crops = _rank_crops_for_planting(s)
     planted_count = 0
     for crop_name in best_crops:
         sc = s.seeds.get(crop_name, 0)
-        if sc <= 0 or not empties or planted_count >= 6:
+        if sc <= 0 or not empties or planted_count >= 10:
             continue
-        for _ in range(min(sc, 3, len(empties))):
+        for _ in range(min(sc, 5, len(empties))):
             pos = empties.pop(0)
             pri = 55 if crop_name in ('WHEAT','CARROT') else 45
             tasks.append((pri, pos, ['PLANT', crop_name], f'plant_{crop_name}'))
             planted_count += 1
 
-    # --- BUILD structures (early game) ---
-    if s.days_left >= 15 and s.money >= 600:
+    # --- BUILD structures (scale with land owned) ---
+    if s.days_left >= 10 and s.money >= 600:
         pastures = s.count_structs('PASTURE')
         coops = s.count_structs('COOP')
-        target_past = min(3, len(s.qs))
-        target_coop = min(2, len(s.qs))
+        target_past = len(s.qs) * 2
+        target_coop = len(s.qs)
         if pastures < target_past and empties:
-            tasks.append((38, empties[-1], ['BUILD_PASTURE'], 'build_past'))
+            tasks.append((38, empties.pop(-1), ['BUILD_PASTURE'], 'build_past'))
         if coops < target_coop and empties:
-            pos = empties[-2] if len(empties) >= 2 else empties[-1]
-            tasks.append((36, pos, ['BUILD_COOP'], 'build_coop'))
+            tasks.append((36, empties.pop(-1), ['BUILD_COOP'], 'build_coop'))
 
     # --- PLACE animals from inventory onto empty structures ---
     for i, inv in enumerate(s.invs):
@@ -314,9 +329,11 @@ def _rank_crops_for_planting(s):
             harv = min(CROP_PRODUCTIONS.get(name, 1),
                        max(1, (s.days_left - fy) // max(1, CROP_INTERVAL.get(name, 1)) + 1))
             rev = price * harv
+            occ_days = fy + (harv - 1) * max(1, CROP_INTERVAL.get(name, 1))
+            roi = (rev - cost) / max(1, occ_days)
         else:
             rev = price * mu
-        roi = (rev - cost) / max(1, fy + 1)
+            roi = (rev - cost) / max(1, my)
         rois.append((roi, name))
     rois.sort(reverse=True)
     return [n for _, n in rois]
@@ -343,9 +360,11 @@ def _rank_crops_for_buying(s):
             harv = min(CROP_PRODUCTIONS.get(name, 1),
                        max(1, (s.days_left - fy) // max(1, CROP_INTERVAL.get(name, 1)) + 1))
             rev = price * harv
+            occ_days = fy + (harv - 1) * max(1, CROP_INTERVAL.get(name, 1))
+            roi = (rev - cost) / max(1, occ_days)
         else:
             rev = price * mu
-        roi = (rev - cost) / max(1, fy + 1)
+            roi = (rev - cost) / max(1, my)
         rois.append((roi, name))
     rois.sort(reverse=True)
     return [n for _, n in rois]
@@ -381,138 +400,135 @@ def assign(tasks, workers, qs):
 # MARKET ORDERS
 # ============================================================
 def market_orders(s):
-    """Generate up to 10 market orders."""
+    """Generate up to 10 market orders. Do non-sells first to avoid starvation."""
     orders = []
     budget = s.money
     liq = s.days_left <= 2
     final = s.day >= 29
-
-    # === SELL ===
-    sell_order = ['MELON','MILK','WOOL','STRAWBERRY','EGG','TOMATO','CARROT','WHEAT','FERTILIZER']
     n_animals = s.count_animals()
 
-    for item in sell_order:
-        qty = s.shed.get(item, 0)
-        if qty <= 0:
-            continue
-        # Reserve wheat for feed
-        if item == 'WHEAT' and not liq:
-            reserve = n_animals * 2 + 3
-            qty = max(0, qty - reserve)
-        # Don't sell animals
-        if item in ('COW','SHEEP','GOOSE') and not liq:
-            continue
-        # Keep fertilizer
-        if item == 'FERTILIZER' and not liq and qty <= 4:
-            continue
-        # Sell caps
-        if not final and not liq:
-            cap = SELL_CAP.get(item, 5)
-            qty = min(qty, cap)
-        if qty > 0:
-            p = s.prices.get(item, BASE_PRICE.get(item, 50))
-            budget += p * qty
-            orders.append(['SELL', item, qty])
-
-    # === HIRE ===
-    if s.hour == 0 and s.days_left > 2:
-        cur = len(s.hands)
-        n_plants = s.count_plants()
-        total_seeds = sum(s.seeds.values())
-        workload = n_plants + n_animals * 3 + total_seeds
-        # At least 1 worker on day 0-2, scale with workload after
-        target = max(1 if s.day <= 2 else 0, workload // 8)
-        target = min(target, 4)  # Max 4 hands
-        need = max(0, target - cur)
-        need = min(need, 2)  # Max 2 hires/day
-
-        for i in range(need):
-            cost = _fib(s.hires_today + i)
-            if cost <= min(budget * 0.1, 100):
-                orders.append(['HIRE'])
-                budget -= cost
-
-    # === BUY SEEDS ===
-    if s.days_left >= 3 and budget >= 20:
-        n_workers = 1 + len(s.hands)
-        n_empty = len(s.empty_tiles())
-        total_seeds = sum(s.seeds.values())
-        # Buy enough to keep all workers planting for ~3 days
-        want = min(n_empty, n_workers * 8) - total_seeds
-        if want > 0:
-            for crop in _rank_crops_for_buying(s):
-                if want <= 0 or budget < 15:
-                    break
-                cost_per = SEED_COST[crop]
-                # Buy bulk cheap seeds, fewer expensive ones
-                if cost_per <= 20:
-                    mx = min(15, want)  # wheat/carrot: buy lots
-                elif cost_per <= 50:
-                    mx = min(5, want)   # tomato
-                else:
-                    mx = min(3, want)   # melon/strawberry
-                buy = min(mx, want)
-                cost = cost_per * buy
-                # Allow up to 50% budget for cheap seeds, 30% for expensive
-                max_frac = 0.5 if cost_per <= 20 else 0.3
-                if cost <= budget * max_frac:
-                    orders.append(['BUY_SEED', crop, buy])
+    # === 1. NON-SELL ORDERS (Buy, Hire, Land) ===
+    if not liq:
+        # HIRE
+        if s.hour == 0 and s.days_left > 2:
+            cur = len(s.hands)
+            n_plants = s.count_plants()
+            total_seeds = sum(s.seeds.values())
+            workload = n_plants + n_animals * 3 + total_seeds
+            target = max(1 if s.day <= 2 else 0, workload // 8)
+            target = min(target, len(s.qs) * 2 + 1)  # Scale hand cap with land
+            need = max(0, min(target - cur, 2))
+            for i in range(need):
+                cost = _fib(s.hires_today + i)
+                if cost <= min(budget * 0.1, 100):
+                    orders.append(['HIRE'])
                     budget -= cost
-                    want -= buy
 
-    # === BUY ANIMALS ===
-    if s.days_left >= 10 and budget >= 500:
-        ep = s.empty_structs('PASTURE')
-        in_shed = sum(s.shed.get(a, 0) for a in ('COW','SHEEP','GOOSE'))
-        carrying = any(isinstance(inv, dict) and any(inv.get(a,0)>0 for a in ('COW','SHEEP','GOOSE'))
-                       for inv in s.invs)
-        if ep and not in_shed and not carrying:
-            best_a, best_roi = None, -1
-            for atype in ('COW','SHEEP'):
-                ad = ANIMAL_YIELD_DAY[atype]
-                ai = ANIMAL_INTERVAL[atype]
-                if s.days_left < ad + ai:
-                    continue
-                prod = ANIMAL_PRODUCT[atype]
-                price = s.prices.get(prod, BASE_PRICE.get(prod, 100))
-                harv = (s.days_left - ad) // ai + 1
-                roi = (price * harv - ANIMAL_COST[atype]) / s.days_left
-                if roi > best_roi:
-                    best_roi, best_a = roi, atype
-            if best_a and budget >= ANIMAL_COST[best_a] * 1.3:
-                n = min(len(ep), int(budget * 0.25 // ANIMAL_COST[best_a]))
-                if n > 0:
-                    orders.append(['BUY_ANIMAL', best_a, n])
-                    budget -= n * ANIMAL_COST[best_a]
-
-        ec = s.empty_structs('COOP')
-        if ec and s.shed.get('GOOSE', 0) == 0 and budget >= 450:
-            if s.days_left >= ANIMAL_YIELD_DAY['GOOSE'] + 2:
-                orders.append(['BUY_ANIMAL', 'GOOSE', min(len(ec), 1)])
-                budget -= 300
-
-    # === BUY WHEAT for feed ===
-    if n_animals > 0 and s.shed.get('WHEAT', 0) < n_animals * 2:
-        need = n_animals * 2 - s.shed.get('WHEAT', 0)
-        wp = s.prices.get('WHEAT', 25)
-        if need > 0 and wp <= 50 and budget >= wp * need:
-            buy = min(need, int(budget * 0.1 // max(wp, 1)))
-            if buy > 0:
-                orders.append(['BUY_PRODUCT', 'WHEAT', buy])
-                budget -= buy * wp
-
-    # === BUY LAND (more aggressive) ===
-    if s.days_left >= 8:
-        qb = len(s.qs) - 1
-        if qb < 3:
-            cost = LAND_COST[qb]
+        # BUY SEEDS
+        if s.days_left >= 3 and budget >= 20:
+            n_workers = 1 + len(s.hands)
             n_empty = len(s.empty_tiles())
-            total = len(s.qs) * 25
-            util = 1.0 - n_empty / max(total, 1)
-            # Buy when >40% utilized and can afford it
-            if util > 0.4 and budget >= cost + 400:
-                orders.append(['BUY_LAND'])
-                budget -= cost
+            total_seeds = sum(s.seeds.values())
+            want = min(n_empty, n_workers * 8) - total_seeds
+            if want > 0:
+                for crop in _rank_crops_for_buying(s):
+                    if want <= 0 or budget < 15:
+                        break
+                    cost_per = SEED_COST[crop]
+                    if cost_per <= 20: mx = min(15, want)
+                    elif cost_per <= 50: mx = min(5, want)
+                    else: mx = min(3, want)
+                    buy = min(mx, want)
+                    cost = cost_per * buy
+                    max_frac = 0.5 if cost_per <= 20 else 0.3
+                    if cost <= budget * max_frac:
+                        orders.append(['BUY_SEED', crop, buy])
+                        budget -= cost
+                        want -= buy
+        
+        # BUY ANIMALS
+        if s.days_left >= 10 and budget >= 500:
+            ep = s.empty_structs('PASTURE')
+            in_shed = sum(s.shed.get(a, 0) for a in ('COW','SHEEP','GOOSE'))
+            carrying = any(isinstance(inv, dict) and any(inv.get(a,0)>0 for a in ('COW','SHEEP','GOOSE')) for inv in s.invs)
+            if ep and not in_shed and not carrying:
+                best_a, best_roi = None, -1
+                for atype in ('COW','SHEEP'):
+                    ad = ANIMAL_YIELD_DAY[atype]
+                    ai = ANIMAL_INTERVAL[atype]
+                    if s.days_left < ad + ai: continue
+                    prod = ANIMAL_PRODUCT[atype]
+                    price = s.prices.get(prod, BASE_PRICE.get(prod, 100))
+                    harv = (s.days_left - ad) // ai + 1
+                    roi = (price * harv - ANIMAL_COST[atype]) / s.days_left
+                    if roi > best_roi:
+                        best_roi, best_a = roi, atype
+                if best_a and budget >= ANIMAL_COST[best_a] * 1.3:
+                    n = min(len(ep), int(budget * 0.25 // ANIMAL_COST[best_a]))
+                    if n > 0:
+                        orders.append(['BUY_ANIMAL', best_a, n])
+                        budget -= n * ANIMAL_COST[best_a]
+
+            ec = s.empty_structs('COOP')
+            if ec and s.shed.get('GOOSE', 0) == 0 and budget >= 450:
+                if s.days_left >= ANIMAL_YIELD_DAY['GOOSE'] + 2:
+                    orders.append(['BUY_ANIMAL', 'GOOSE', min(len(ec), 1)])
+                    budget -= 300
+
+        # BUY WHEAT for feed
+        if n_animals > 0 and s.shed.get('WHEAT', 0) < n_animals * 2:
+            need = n_animals * 2 - s.shed.get('WHEAT', 0)
+            wp = s.prices.get('WHEAT', 25)
+            if need > 0 and wp <= 50 and budget >= wp * need:
+                buy = min(need, int(budget * 0.1 // max(wp, 1)))
+                if buy > 0:
+                    orders.append(['BUY_PRODUCT', 'WHEAT', buy])
+                    budget -= buy * wp
+
+        # BUY LAND
+        if s.days_left >= 8:
+            qb = len(s.qs) - 1
+            if qb < 3:
+                cost = LAND_COST[qb]
+                n_empty = len(s.empty_tiles())
+                total = len(s.qs) * 25
+                util = 1.0 - n_empty / max(total, 1)
+                buffer = 400 + (len(s.hands) * 10) + (n_animals * 30)
+                if util > 0.4 and budget >= cost + buffer:
+                    orders.append(['BUY_LAND'])
+                    budget -= cost
+
+    # === 2. SELL ORDERS (Fill remaining slots) ===
+    slots_left = 10 - len(orders)
+    if slots_left > 0:
+        sell_order = ['MELON','MILK','WOOL','STRAWBERRY','EGG','TOMATO','CARROT','WHEAT','FERTILIZER']
+        sells = []
+        for item in sell_order:
+            qty = s.shed.get(item, 0)
+            if qty <= 0:
+                continue
+            if item == 'WHEAT' and not liq:
+                qty = max(0, qty - (n_animals * 2 + 3))
+            if item in ('COW','SHEEP','GOOSE') and not liq:
+                continue
+            if item == 'FERTILIZER' and not liq and qty <= 4:
+                continue
+            if not final and not liq:
+                cap = SELL_CAP.get(item, 5)
+                # Throttle on severe price crash
+                bp = BASE_PRICE.get(item, 50)
+                cp = s.prices.get(item, bp)
+                if cp < bp * 0.7: 
+                    cap = max(1, cap // 2)
+                qty = min(qty, cap)
+            if qty > 0:
+                p = s.prices.get(item, BASE_PRICE.get(item, 50))
+                sells.append((p * qty, item, qty))
+        
+        # Sort sells by total value to prioritize highest cash generation
+        sells.sort(reverse=True)
+        for _, item, qty in sells[:slots_left]:
+            orders.append(['SELL', item, qty])
 
     return orders[:10]
 
