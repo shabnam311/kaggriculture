@@ -31,8 +31,6 @@ LAND_COST = [1000, 2000, 4000]
 SHED_CAP = 100
 
 # Fragile price items — sell in small batches to respect MAX_SELL_PER_TURN limits
-SELL_CAP = {'MELON': 1, 'WOOL': 2, 'MILK': 2, 'STRAWBERRY': 2, 'EGG': 5,
-            'TOMATO': 3, 'CARROT': 3, 'WHEAT': 10, 'FERTILIZER': 5}
 
 def _fib(n):
     a, b = 1, 1
@@ -188,18 +186,26 @@ def make_tasks(s):
             pri = 100 if uw >= 1 else 70
             tasks.append((pri + uw*5, (x, y), ['WATER'], 'water')) # Scale priority
 
-    # --- FEED animals ---
+    # --- FEED, CARE, COLLECT_FERTILIZER animals ---
     wheat_avail = s.total_wheat()
     fed = 0
     for x, y, t in s.iter_tiles():
-        if t.get('kind') in ('COOP','PASTURE') and t.get('animal') and not t.get('fed_today', False):
-            uf = t.get('consecutive_unfed', 0)
-            pri = 100 if uf >= 1 else 68
-            if fed < wheat_avail:
-                tasks.append((pri + uf*5, (x, y), ['FEED'], 'feed')) # Scale priority
-                fed += 1
+        if t.get('kind') in ('COOP','PASTURE') and t.get('animal'):
+            # Feed
+            if not t.get('fed_today', False):
+                uf = t.get('consecutive_unfed', 0)
+                pri = 100 if uf >= 1 else 68
+                if fed < wheat_avail:
+                    tasks.append((pri + uf*5, (x, y), ['FEED'], 'feed'))
+                    fed += 1
+            # Care (free yield bonus)
+            if not t.get('cared_today', False):
+                tasks.append((66, (x, y), ['CARE'], 'care'))
+            # Collect free fertilizer
+            if t.get('fertilizer_available', False):
+                tasks.append((48, (x, y), ['COLLECT_FERTILIZER'], 'collect_fert'))
 
-    # --- FERTILIZE high value crops ---
+    # --- FERTILIZE high value crops (timing gated) ---
     fert_avail = s.shed.get('FERTILIZER', 0)
     for inv in s.invs:
         if isinstance(inv, dict): fert_avail += inv.get('FERTILIZER', 0)
@@ -207,14 +213,36 @@ def make_tasks(s):
     for x, y, t in s.iter_tiles():
         if t.get('kind') == 'PLANT' and t.get('crop') in ('MELON', 'STRAWBERRY', 'TOMATO'):
             if not t.get('fertilized', False) and fert_used < fert_avail:
-                tasks.append((65, (x, y), ['FERTILIZE'], 'fertilize'))
-                fert_used += 1
+                crop = t.get('crop')
+                age = s.day - t.get('planted_day', s.day)
+                cd = CROP_YIELD.get(crop)
+                if cd:
+                    first_day, max_day, _ = cd
+                    # Only fertilize if within 2 days of a yield event
+                    time_to_yield = 999
+                    if CROP_TYPE.get(crop) == 'once':
+                        time_to_yield = max_day - age
+                    else:
+                        if age < first_day:
+                            time_to_yield = first_day - age
+                        else:
+                            interval = CROP_INTERVAL.get(crop, 1)
+                            time_to_yield = (interval - ((age - first_day) % interval)) % interval
+                            
+                    if 0 <= time_to_yield <= 2:
+                        tasks.append((65, (x, y), ['FERTILIZE'], 'fertilize'))
+                        fert_used += 1
 
     # --- HARVEST mature crops and animal products ---
     for x, y, t in s.iter_tiles():
         yu = t.get('yield_units', 0)
         if yu <= 0:
             continue
+            
+        # Stop harvesting in the final hours of the game so workers have time to DROP
+        if s.day == 29 and s.hour >= 20:
+            continue
+            
         kind = t.get('kind', '')
         if kind == 'PLANT':
             crop = t.get('crop', '')
@@ -287,8 +315,8 @@ def make_tasks(s):
 
     # --- PICKUP wheat for feeding ---
     if fed > 0 and s.shed.get('WHEAT', 0) > 0:
-        farmer_wheat = s.invs[0].get('WHEAT', 0) if s.invs and isinstance(s.invs[0], dict) else 0
-        if farmer_wheat == 0 and shed_t:
+        wheat_carried = sum(inv.get('WHEAT', 0) for inv in s.invs if isinstance(inv, dict))
+        if wheat_carried == 0 and shed_t:
             qty = min(s.shed['WHEAT'], 6)
             tasks.append((72, shed_t[0], ['PICKUP', 'WHEAT', qty], 'pu_wheat'))
 
@@ -330,6 +358,17 @@ def _rank_crops_for_planting(s):
             continue
         if s.days_left < fy + 1:
             continue
+        # Early game: skip expensive seeds to preserve capital
+        if s.day < 5 and SEED_COST[name] > 30:
+            continue
+        
+        # Hard-cap thin curve crops to minority position
+        current = sum(1 for _,_,t in s.iter_tiles() if t.get('crop') == name)
+        if name == 'MELON' and current >= 2:
+            continue
+        if name == 'STRAWBERRY' and current >= 3:
+            continue
+
         price = s.prices.get(name, BASE_PRICE.get(name, 50))
         cost = SEED_COST[name]
         if CROP_TYPE[name] == 'ongoing':
@@ -361,6 +400,14 @@ def _rank_crops_for_buying(s):
         # Mid game: allow melons but still skip strawberry if too expensive
         if s.day < 10 and name == 'STRAWBERRY':
             continue
+        
+        # Hard-cap thin curve crops to minority position
+        current = sum(1 for _,_,t in s.iter_tiles() if t.get('crop') == name)
+        if name == 'MELON' and current >= 2:
+            continue
+        if name == 'STRAWBERRY' and current >= 3:
+            continue
+
         price = s.prices.get(name, BASE_PRICE.get(name, 50))
         cost = SEED_COST[name]
         if CROP_TYPE[name] == 'ongoing':
@@ -549,14 +596,22 @@ def market_orders(s):
                 continue
             if item == 'FERTILIZER' and not liq and qty <= 4:
                 continue
+            
             if not final and not liq:
-                cap = SELL_CAP.get(item, 5)
-                # Throttle on severe price crash
                 bp = BASE_PRICE.get(item, 50)
                 cp = s.prices.get(item, bp)
-                if cp < bp * 0.7: 
-                    cap = max(1, cap // 2)
-                qty = min(qty, cap)
+                
+                # Deep crash territory -> halt selling to let market recover
+                if cp < bp * 0.3:
+                    qty = 0
+                else:
+                    # Throttle thin curve items to avoid triggering crashes
+                    if item in ('MELON', 'WOOL'):
+                        qty = min(qty, 1) # Extremely fragile curves (sq)
+                    elif item in ('STRAWBERRY', 'MILK'):
+                        qty = min(qty, 2)
+                    # Wheat/Carrot/Egg have forgiving curves, sell full volume
+            
             if qty > 0:
                 p = s.prices.get(item, BASE_PRICE.get(item, 50))
                 sells.append((p * qty, item, qty))
