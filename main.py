@@ -297,13 +297,20 @@ def make_tasks(s):
         for i, inv in enumerate(s.invs):
             if not isinstance(inv, dict):
                 continue
-            carried = sum(v for k, v in inv.items() if isinstance(v, (int, float)) and k not in ('COW','SHEEP','GOOSE'))
-            if carried >= 2:
+            carried = 0
+            val = 0
+            for k, v in inv.items():
+                if isinstance(v, (int, float)) and k not in ('COW','SHEEP','GOOSE'):
+                    carried += v
+                    val += v * s.prices.get(k, BASE_PRICE.get(k, 50))
+            if carried >= 2 or (carried >= 1 and s.days_left <= 3):
                 wpos = s.farmer if i == 0 else (s.hands[i-1] if i-1 < len(s.hands) else None)
                 if wpos is None:
                     continue
                 st = min(shed_t, key=lambda p: _dist(wpos, p))
-                pri = 65 if s.days_left <= 3 else (45 if carried >= 5 else 20)
+                # Base priority on total value being carried
+                base_pri = 25 + min(35, val // 50)
+                pri = 75 if s.days_left <= 3 else base_pri
                 tasks.append((pri, st, ['DROP'], f'drop_w{i}'))
 
     # --- DIG weeds ---
@@ -374,24 +381,43 @@ def _rank_crops_for_buying(s):
 # WORKER ASSIGNMENT
 # ============================================================
 def assign(tasks, workers, qs):
-    """Greedy nearest-worker assignment. Returns {worker_idx: action_list}."""
+    """Assign tasks to workers balancing priority and distance."""
     avail = {idx: pos for pos, idx in workers}
     result = {}
-    used = set()
-
-    for tidx, (pri, tpos, tact, tag) in enumerate(tasks):
-        if not avail:
-            break
-        # Find nearest available worker
-        best = min(avail.items(), key=lambda kv: _dist(kv[1], tpos))
-        widx, wpos = best
-
-        if wpos == tpos:
-            result[widx] = tact
+    
+    # Re-score tasks for each worker based on distance
+    # We iteratively pick the best (worker, task) pair
+    remaining_tasks = tasks.copy()
+    
+    while avail and remaining_tasks:
+        best_score = -9999
+        best_match = None
+        
+        for widx, wpos in avail.items():
+            for tidx, (pri, tpos, tact, tag) in enumerate(remaining_tasks):
+                dist = _dist(wpos, tpos)
+                # Discount priority by distance (e.g., -2 priority per tile)
+                # But don't let distance override critical tasks (pri 100)
+                if pri >= 95:
+                    score = pri - dist * 0.1
+                else:
+                    score = pri - dist * 4
+                    
+                if score > best_score:
+                    best_score = score
+                    best_match = (widx, tidx, wpos, tpos, tact)
+                    
+        if best_match:
+            widx, tidx, wpos, tpos, tact = best_match
+            if wpos == tpos:
+                result[widx] = tact
+            else:
+                d = _bfs(wpos, tpos, qs)
+                result[widx] = [d] if d else ['PASS']
+            del avail[widx]
+            remaining_tasks.pop(tidx)
         else:
-            d = _bfs(wpos, tpos, qs)
-            result[widx] = [d] if d else ['PASS']
-        del avail[widx]
+            break
 
     return result
 
