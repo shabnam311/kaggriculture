@@ -442,7 +442,7 @@ def market_orders(s):
             total_seeds = sum(s.seeds.values())
             workload = n_plants + n_animals * 3 + total_seeds
             target = max(1 if s.day <= 2 else 0, workload // 8)
-            target = min(target, len(s.qs) * 2 + 1)  # Scale hand cap with land
+            target = min(target, len(s.qs) * 2 + 2)  # Scale hand cap with land (max 4 on 1 quad)
             need = max(0, min(target - cur, 2))
             for i in range(need):
                 cost = _fib(s.hires_today + i)
@@ -520,7 +520,7 @@ def market_orders(s):
                 total = len(s.qs) * 25
                 util = 1.0 - n_empty / max(total, 1)
                 buffer = 400 + (len(s.hands) * 10) + (n_animals * 30)
-                if util > 0.4 and budget >= cost + buffer:
+                if (util > 0.35 and budget >= cost + buffer) or (budget >= cost + buffer + 800):
                     orders.append(['BUY_LAND'])
                     budget -= cost
 
