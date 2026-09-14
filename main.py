@@ -364,9 +364,9 @@ def _rank_crops_for_planting(s):
         
         # Hard-cap thin curve crops to minority position
         current = sum(1 for _,_,t in s.iter_tiles() if t.get('crop') == name)
-        if name == 'MELON' and current >= 2:
+        if name == 'MELON' and current >= 6:
             continue
-        if name == 'STRAWBERRY' and current >= 3:
+        if name == 'STRAWBERRY' and current >= 12:
             continue
 
         price = s.prices.get(name, BASE_PRICE.get(name, 50))
@@ -403,9 +403,9 @@ def _rank_crops_for_buying(s):
         
         # Hard-cap thin curve crops to minority position
         current = sum(1 for _,_,t in s.iter_tiles() if t.get('crop') == name)
-        if name == 'MELON' and current >= 2:
+        if name == 'MELON' and current >= 6:
             continue
-        if name == 'STRAWBERRY' and current >= 3:
+        if name == 'STRAWBERRY' and current >= 12:
             continue
 
         price = s.prices.get(name, BASE_PRICE.get(name, 50))
@@ -427,7 +427,7 @@ def _rank_crops_for_buying(s):
 # ============================================================
 # WORKER ASSIGNMENT
 # ============================================================
-def assign(tasks, workers, qs):
+def assign(tasks, workers, qs, invs):
     """Assign tasks to workers balancing priority and distance."""
     avail = {idx: pos for pos, idx in workers}
     result = {}
@@ -441,11 +441,19 @@ def assign(tasks, workers, qs):
         best_match = None
         
         for widx, wpos in avail.items():
+            winv = invs[widx] if widx < len(invs) else {}
+            if not isinstance(winv, dict): winv = {}
+            
             for tidx, (pri, tpos, tact, tag) in enumerate(remaining_tasks):
+                # Filter out tasks the worker literally cannot perform
+                if tact[0] == 'FEED' and winv.get('WHEAT', 0) == 0:
+                    continue
+                if tact[0] == 'PLACE' and winv.get(tact[1], 0) == 0:
+                    continue
+                
                 dist = _dist(wpos, tpos)
-                # Discount priority by distance (e.g., -2 priority per tile)
-                # But don't let distance override critical tasks (pri 100)
-                if pri >= 95:
+                # Tasks 80+ are "committed routes", barely affected by distance
+                if pri >= 80:
                     score = pri - dist * 0.1
                 else:
                     score = pri - dist * 4
@@ -639,7 +647,7 @@ def agent(obs, configuration=None, *args, **kwargs):
         workers = s.worker_positions()
 
         # Assign tasks to workers
-        assignments = assign(tasks, workers, s.qs)
+        assignments = assign(tasks, workers, s.qs, s.invs)
 
         # Build farmer action
         fa = assignments.get(0, ['PASS'])
