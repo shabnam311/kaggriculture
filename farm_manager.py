@@ -77,7 +77,9 @@ class FarmManager:
         return tasks
     
     def _harvest_tasks(self):
-        """Generate harvest tasks for tiles with yield_units > 0 AND that are mature."""
+        """Generate harvest tasks for tiles with yield_units > 0 AND that are mature.
+        FIX: For one-time crops, wait until max_yield_day for full yield,
+        unless we're in liquidation or don't have enough days left."""
         tasks = []
         s = self.state
         harvestable = find_harvestable(s.my_tiles, s.unlocked_quadrants)
@@ -91,8 +93,17 @@ class FarmManager:
                 crop_data = CROP_DATA.get(crop, {})
                 planted_day = tile.get('planted_day', s.day)
                 age = s.day - planted_day
+                
                 if age < crop_data.get('first_yield_day', 0):
-                    continue  # Not mature yet!
+                    continue  # Not mature yet at all
+                
+                # For one-time crops, wait for max yield unless running out of time
+                if crop_data.get('yield_type') == 'one_time':
+                    max_yield_day = crop_data.get('max_yield_day', crop_data.get('first_yield_day', 0))
+                    # Harvest early if: liquidation phase OR crop would expire after game ends
+                    if age < max_yield_day and s.days_remaining > 2:
+                        continue  # Still growing, wait for more yield
+                        
             elif kind in ('COOP', 'PASTURE'):
                 animal = tile.get('animal', '')
                 animal_data = ANIMAL_DATA.get(animal, {})
@@ -103,11 +114,17 @@ class FarmManager:
             
             base_pri = PRIORITY_HIGH_HARVEST
             
-            # Boost priority for decaying one-time crops
+            # Boost priority for decaying one-time crops that have reached max yield
             if kind == 'PLANT':
                 crop_data = CROP_DATA.get(tile.get('crop', ''), {})
                 if crop_data.get('yield_type') == 'one_time':
-                    base_pri += 10  # Harvest urgently before decay
+                    planted_day = tile.get('planted_day', s.day)
+                    age = s.day - planted_day
+                    max_yield_day = crop_data.get('max_yield_day', crop_data.get('first_yield_day', 0))
+                    if age >= max_yield_day:
+                        base_pri += 15  # Ready for full harvest — do it now!
+                    else:
+                        base_pri += 5   # Forced early harvest (liquidation)
             
             # Boost priority for high-value products
             crop = tile.get('crop', tile.get('animal', ''))
@@ -118,7 +135,7 @@ class FarmManager:
         return tasks
     
     def _plant_tasks(self):
-        """Generate planting tasks based on available seeds and strategy."""
+        """Generate planting tasks based on available seeds and ROI strategy."""
         tasks = []
         s = self.state
         
@@ -126,7 +143,7 @@ class FarmManager:
         if not empty_tiles:
             return tasks
         
-        # Determine what to plant based on remaining days
+        # Determine what to plant based on ROI
         crop_priority = self._choose_crops_to_plant()
         
         # Sort empty tiles by proximity to farmer for efficiency
@@ -152,33 +169,44 @@ class FarmManager:
         return tasks
     
     def _choose_crops_to_plant(self):
-        """Decide which crops to plant based on game phase.
-        Returns list of (crop_name, desired_count) tuples.
-        
-        Key insight: Aggressively fill empty tiles with profitable crops.
-        Prioritize high-value crops (Melons) if there is time, otherwise Wheat/Carrots."""
+        """ROI-driven crop selection using live market prices.
+        Returns list of (crop_name, desired_count) tuples sorted by ROI."""
         s = self.state
         days_left = s.days_remaining
         
-        priorities = []
-        
-        # High value late game crops
-        if days_left >= 12:
-            priorities.append(('MELON', 10))
-        
-        if days_left >= 13:
-            priorities.append(('TOMATO', 5))
+        crop_rois = []
+        for crop_name, data in CROP_DATA.items():
+            # Skip if not enough time to harvest
+            if days_left < data['first_yield_day'] + 1:
+                continue
             
-        # Fast cash crops to fill out the rest
-        if days_left >= 3:
-            # Plant lots of carrots for cash if early enough
-            if s.day < 25:
-                priorities.append(('CARROT', 10))
-                
-            # Wheat is the ultimate filler - always need it for feed or cash
-            priorities.append(('WHEAT', 20))
+            # Use live price
+            price = s.market_prices.get(crop_name, data['base_price'])
+            
+            if data['yield_type'] == 'ongoing':
+                cycles = min(data['total_productions'],
+                           max(1, (days_left - data['first_yield_day']) // max(1, data['subsequent_interval']) + 1))
+                total_revenue = price * cycles
+            else:
+                total_revenue = price * data['max_yield']
+            
+            days_occupied = min(days_left, data['first_yield_day'] + 1)
+            roi = (total_revenue - data['seed_cost']) / max(1, days_occupied)
+            
+            # Determine allocation count based on ROI tier
+            if roi > 100:
+                count = 8   # Top tier (usually Melon)
+            elif roi > 30:
+                count = 6   # Good tier (Carrot, Wheat)
+            elif roi > 15:
+                count = 4   # Medium (Strawberry sometimes)
+            else:
+                count = 2   # Low tier (Tomato usually)
+            
+            crop_rois.append((roi, crop_name, count))
         
-        return priorities
+        crop_rois.sort(reverse=True)
+        return [(name, count) for _, name, count in crop_rois]
     
     def _care_tasks(self):
         """Generate care tasks for animals."""
@@ -189,7 +217,8 @@ class FarmManager:
         return tasks
     
     def _fertilize_tasks(self):
-        """Generate fertilize tasks for high-value crops."""
+        """Generate fertilize tasks for high-value crops.
+        Prioritize by crop ROI, not a fixed list."""
         tasks = []
         s = self.state
         
@@ -204,23 +233,34 @@ class FarmManager:
         
         # Find plants that would benefit from fertilizer
         plants = find_tiles_by_kind(s.my_tiles, 'PLANT', s.unlocked_quadrants)
-        fert_used = 0
+        
+        # Sort by crop ROI for fertilizer prioritization
+        fertilizable = []
         for x, y, tile in plants:
-            if fert_used >= fert_count:
-                break
             crop = tile.get('crop', '')
             fert_until = tile.get('fertilized_until_day', -1)
-            
-            # Skip already fertilized
             if fert_until >= s.day:
-                continue
+                continue  # Already fertilized
             
-            # Prioritize high-value crops for fertilizer
-            if crop in ('MELON', 'STRAWBERRY', 'TOMATO'):
+            # Compute ROI for this crop
+            data = CROP_DATA.get(crop, {})
+            price = s.market_prices.get(crop, data.get('base_price', 25))
+            # Fertilizer value = extra yield * price
+            extra_yield = data.get('max_yield', 4) - data.get('max_yield_unfertilized', 3)
+            fert_value = extra_yield * price
+            fertilizable.append((fert_value, x, y, tile))
+        
+        # Sort by fertilizer value descending
+        fertilizable.sort(reverse=True)
+        
+        fert_used = 0
+        for fert_value, x, y, tile in fertilizable:
+            if fert_used >= fert_count:
+                break
+            if fert_value > 0:
                 tasks.append(Task('fertilize', (x, y), PRIORITY_MEDIUM_FERTILIZE + 5, ['FERTILIZE']))
                 fert_used += 1
-            elif crop == 'WHEAT' and fert_count > 2:
-                # Only fertilize wheat if we have surplus fertilizer
+            elif fert_count > 3:  # Only fertilize low-value crops if surplus
                 tasks.append(Task('fertilize', (x, y), PRIORITY_MEDIUM_FERTILIZE, ['FERTILIZE']))
                 fert_used += 1
         
@@ -236,7 +276,7 @@ class FarmManager:
     
     def _build_tasks(self):
         """Generate build tasks for animal structures.
-        Strategy: build pastures for cows early, they're the best ongoing income."""
+        Strategy: build pastures for cows/sheep, coops for geese."""
         tasks = []
         s = self.state
         
@@ -248,16 +288,19 @@ class FarmManager:
         pastures = find_tiles_by_kind(s.my_tiles, 'PASTURE', s.unlocked_quadrants)
         coops = find_tiles_by_kind(s.my_tiles, 'COOP', s.unlocked_quadrants)
         
-        # Target: 3 pastures for cows (primary income), 1 coop for goose
-        target_pastures = 3
-        target_coops = 1
+        # Target: scale with available land
+        total_tiles = len(s.unlocked_quadrants) * 25
+        # Allocate ~20% of tiles to animal structures
+        target_pastures = min(6, max(2, total_tiles // 12))
+        target_coops = min(2, max(1, total_tiles // 25))
         
         # Adjust targets based on money available
-        if s.my_money < 1000:
+        if s.my_money < 300:
             target_pastures = min(target_pastures, 1)
             target_coops = 0
-        elif s.my_money < 2000:
-            target_pastures = min(target_pastures, 2)
+        elif s.my_money < 1500:
+            target_pastures = min(target_pastures, 3)
+            target_coops = min(target_coops, 1)
         
         empty_tiles = find_empty_tiles(s.my_tiles, s.unlocked_quadrants)
         if not empty_tiles:
@@ -292,26 +335,47 @@ class FarmManager:
         return tasks
     
     def _drop_tasks(self):
-        """Generate tasks to drop inventory at the shed when inventory is getting full."""
+        """Generate tasks to drop inventory at the shed.
+        FIX: Only drop if shed has room AND worker is close to shed."""
         tasks = []
         s = self.state
         
-        if s.total_shed_items() >= SHED_CAPACITY:
+        shed_room = SHED_CAPACITY - s.total_shed_items()
+        if shed_room <= 0:
             return tasks  # Shed is full, no point dropping
         
-        # Only create drop tasks if workers actually have meaningful inventory
+        # In liquidation, lower threshold to 1 item
+        drop_threshold = 1 if s.days_remaining <= 3 else 3
+        
         for i, inv in enumerate(s.inventories):
             if isinstance(inv, dict):
                 total_items = sum(v for v in inv.values() if isinstance(v, (int, float)))
-                if total_items >= 3:  # Only drop if carrying 3+ items
+                if total_items >= drop_threshold:
+                    # Get worker position
+                    if i == 0:
+                        worker_pos = s.farmer_pos
+                    elif i - 1 < len(s.hand_positions):
+                        worker_pos = s.hand_positions[i - 1]
+                    else:
+                        continue
+                    
                     nearest_shed = min(SHED_ADJACENT_TILES,
-                                     key=lambda t: manhattan_dist(
-                                         s.farmer_pos if i == 0 else s.hand_positions[i-1] if i-1 < len(s.hand_positions) else s.farmer_pos,
-                                         t))
-                    tasks.append(Task(
-                        'drop', nearest_shed, PRIORITY_LOWEST_DROP,
-                        ['DROP'],
-                        details={'worker_index': i}
-                    ))
+                                     key=lambda t: manhattan_dist(worker_pos, t))
+                    dist_to_shed = manhattan_dist(worker_pos, nearest_shed)
+                    
+                    # Only prioritize drop if worker is close to shed (within 4 tiles)
+                    # or carrying a lot of items
+                    if dist_to_shed <= 4 or total_items >= 6:
+                        priority = PRIORITY_LOWEST_DROP
+                        if total_items >= 8:
+                            priority += 15  # Boost if carrying a lot
+                        if s.days_remaining <= 3:
+                            priority += 20  # Boost during liquidation
+                        
+                        tasks.append(Task(
+                            'drop', nearest_shed, priority,
+                            ['DROP'],
+                            details={'worker_index': i}
+                        ))
         
         return tasks

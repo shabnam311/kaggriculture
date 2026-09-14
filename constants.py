@@ -72,8 +72,8 @@ CROP_DATA = {
         'seed_cost': 80,
         'base_price': 250,
         'yield_type': 'one_time',
-        'first_yield_day': 10,   # Engine says age 10 for max yield
-        'max_yield_day': 10,
+        'first_yield_day': 10,   # Engine says age 10 for first harvest
+        'max_yield_day': 12,     # Engine allows watering growth up to day 12
         'max_yield': 6,
         'max_yield_unfertilized': 6,
         'subsequent_interval': 0,

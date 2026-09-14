@@ -60,7 +60,7 @@ def assign_tasks_to_workers(workers, tasks):
     return assigned
 
 
-def get_worker_action(worker_pos, task):
+def get_worker_action(worker_pos, task, unlocked_quadrants):
     """
     Given a worker's current position and their assigned task,
     return the action they should take this turn.
@@ -84,7 +84,7 @@ def get_worker_action(worker_pos, task):
             # Move toward nearest shed-adjacent tile
             from constants import SHED_ADJACENT_TILES
             nearest_shed = min(SHED_ADJACENT_TILES, key=lambda s: manhattan_dist((wx, wy), s))
-            direction = direction_toward((wx, wy), nearest_shed)
+            direction = direction_toward((wx, wy), nearest_shed, unlocked_quadrants)
             return direction if direction else 'PASS'
     
     # Check if we're at the task position
@@ -93,7 +93,7 @@ def get_worker_action(worker_pos, task):
         return task.action
     
     # Move toward the task position
-    direction = direction_toward((wx, wy), (tx, ty))
+    direction = direction_toward((wx, wy), (tx, ty), unlocked_quadrants)
     return direction if direction else 'PASS'
 
 

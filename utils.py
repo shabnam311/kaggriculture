@@ -20,28 +20,46 @@ def is_shed_adjacent(pos):
     """Check if position is orthogonally adjacent to the shed."""
     return tuple(pos) in SHED_ADJACENT_TILES
 
-def direction_toward(current, target):
-    """Return the direction string to move one step from current toward target.
-    Uses manhattan priority: move along the axis with greater distance first."""
+def direction_toward(current, target, unlocked_quadrants):
+    """Return the direction string to move one step from current toward target using BFS.
+    Workers CAN walk through all tiles including the shed-adjacent center tiles."""
     cx, cy = current
     tx, ty = target
-    dx = tx - cx
-    dy = ty - cy
     
-    if dx == 0 and dy == 0:
-        return None  # Already there
+    if cx == tx and cy == ty:
+        return None
+        
+    from collections import deque
+    q = deque([(current, [])])
+    visited = {current}
     
-    # Prioritize the axis with greater distance
+    # Fast path: if adjacent and target is unlocked, just go
+    if manhattan_dist(current, target) == 1:
+        if is_tile_unlocked(tx, ty, unlocked_quadrants):
+            dx, dy = tx - cx, ty - cy
+            if dx == 1: return 'EAST'
+            if dx == -1: return 'WEST'
+            if dy == 1: return 'SOUTH'
+            if dy == -1: return 'NORTH'
+        
+    while q:
+        pos, path = q.popleft()
+        if pos == target:
+            return path[0] if path else None
+            
+        x, y = pos
+        for dx, dy, d_name in [(0, -1, 'NORTH'), (0, 1, 'SOUTH'), (1, 0, 'EAST'), (-1, 0, 'WEST')]:
+            nx, ny = x + dx, y + dy
+            if (nx, ny) not in visited and 0 <= nx < 10 and 0 <= ny < 10:
+                if is_tile_unlocked(nx, ny, unlocked_quadrants):
+                    visited.add((nx, ny))
+                    q.append(((nx, ny), path + [d_name]))
+    
+    # Fallback to simple manhattan if no path found (shouldn't happen)
+    dx, dy = tx - cx, ty - cy
     if abs(dx) >= abs(dy):
-        if dx > 0:
-            return 'EAST'
-        else:
-            return 'WEST'
-    else:
-        if dy > 0:
-            return 'SOUTH'
-        else:
-            return 'NORTH'
+        return 'EAST' if dx > 0 else 'WEST'
+    return 'SOUTH' if dy > 0 else 'NORTH'
 
 def get_quadrant(x, y):
     """Return quadrant name for a tile position."""

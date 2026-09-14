@@ -15,47 +15,53 @@ class MarketManager:
     
     def get_market_orders(self):
         """Generate list of market orders for this turn.
-        Returns list of lists like [['BUY_SEED', 'WHEAT', 5], ['SELL', 'EGG', 3], etc.]
         Max 10 orders per turn.
         
-        CRITICAL: Sells go FIRST so revenue funds purchases in the same turn."""
-        orders = []
+        CRITICAL: Uses mutable budget tracker [remaining] to prevent overspending.
+        Sells go FIRST so revenue funds purchases in the same turn."""
         s = self.state
         
         # --- SELLS (place first so revenue funds purchases) ---
-        orders.extend(self._sell_orders())
+        sell_orders = self._sell_orders()
         
-        # --- Estimate budget (current money + estimated sell revenue) ---
-        remaining_budget = s.my_money
+        # Estimate sell revenue for budget
+        estimated_revenue = 0
+        for order in sell_orders:
+            if order[0] == 'SELL' and len(order) >= 3:
+                item, qty = order[1], order[2]
+                price = s.market_prices.get(item, 50)
+                estimated_revenue += price * qty
         
-        # Buy wheat for feed if animals need it
-        orders.extend(self._buy_feed_orders(remaining_budget))
+        # Mutable budget tracker: [remaining_budget]
+        budget = [s.my_money + estimated_revenue]
         
-        # Buy seeds  
-        orders.extend(self._buy_seed_orders(remaining_budget))
+        # --- HIRE (place before buys — need workers!) ---
+        hire_orders = self._hire_orders(budget)
         
-        # Buy animals
-        orders.extend(self._buy_animal_orders(remaining_budget))
+        # --- BUY orders ---
+        buy_orders = []
+        buy_orders.extend(self._buy_feed_orders(budget))
+        buy_orders.extend(self._buy_seed_orders(budget))
+        buy_orders.extend(self._buy_animal_orders(budget))
         
-        # Hire farm hands
-        orders.extend(self._hire_orders(remaining_budget))
+        # --- BUY_LAND (place last — only if budget allows) ---
+        land_orders = self._buy_land_orders(budget)
         
-        # Buy land
-        orders.extend(self._buy_land_orders(remaining_budget))
-        
-        # Cap at 10 orders
-        return orders[:10]
+        # Assemble: sells first (for revenue), then hire, then buys, then land
+        all_orders = sell_orders + hire_orders + buy_orders + land_orders
+        return all_orders[:10]
     
     def _sell_orders(self):
         """Generate sell orders for items in the shed.
-        Key strategy: sell every turn to keep cash flowing."""
+        Uses dynamic sell metering based on live prices."""
         orders = []
         s = self.state
         
-        # In the last 3 days, sell EVERYTHING aggressively
-        liquidation_mode = s.days_remaining <= 3
+        # In the last 2 days, sell EVERYTHING aggressively
+        liquidation_mode = s.days_remaining <= 2
+        # On the very last day, ignore ALL caps
+        final_day = s.day >= 29
         
-        # Determine items to sell (prioritize high-value items first)
         sell_priority = ['MELON', 'MILK', 'WOOL', 'STRAWBERRY', 'EGG', 'TOMATO', 'CARROT', 'WHEAT', 'FERTILIZER']
         
         for item in sell_priority:
@@ -66,8 +72,7 @@ class MarketManager:
             # Don't sell wheat if we need it for animal feed (unless liquidating)
             if item == 'WHEAT' and not liquidation_mode:
                 animals_count = s.num_animals()
-                # Keep 1-day feed reserve only
-                wheat_reserve = animals_count
+                wheat_reserve = animals_count + 2
                 sellable = max(0, quantity - wheat_reserve)
                 if sellable <= 0:
                     continue
@@ -81,12 +86,28 @@ class MarketManager:
             if item == 'FERTILIZER' and not liquidation_mode:
                 if quantity <= 5:
                     continue
-                quantity = quantity - 3  # Keep some for crop fertilization
+                quantity = quantity - 3
             
-            # Meter sales for fragile products (unless liquidating)
+            # Dynamic sell metering based on LIVE prices
             if item in FRAGILE_PRODUCTS and not liquidation_mode:
-                max_sell = MAX_SELL_PER_TURN.get(item, 2)
-                quantity = min(quantity, max_sell)
+                product_to_base = {
+                    'MILK': 160, 'WOOL': 200, 'EGG': 50,
+                    'MELON': 250, 'STRAWBERRY': 120, 'TOMATO': 60,
+                    'CARROT': 35, 'WHEAT': 25,
+                }
+                base_price = product_to_base.get(item, 50)
+                current_price = s.market_prices.get(item, base_price)
+                price_ratio = current_price / max(base_price, 1)
+                
+                static_cap = MAX_SELL_PER_TURN.get(item, 2)
+                if final_day:
+                    pass  # Sell everything
+                elif price_ratio > 1.2:
+                    quantity = min(quantity, static_cap * 2)
+                elif price_ratio < 0.4:
+                    continue  # Price crashed, skip
+                else:
+                    quantity = min(quantity, static_cap)
             
             if quantity > 0:
                 orders.append(['SELL', item, quantity])
@@ -94,7 +115,8 @@ class MarketManager:
         return orders
     
     def _buy_feed_orders(self, budget):
-        """Buy wheat from market if we need animal feed."""
+        """Buy wheat from market if we need animal feed.
+        budget is a mutable list [remaining_amount]."""
         orders = []
         s = self.state
         
@@ -105,20 +127,21 @@ class MarketManager:
         wheat_available = s.get_wheat_supply()
         wheat_price = s.market_prices.get('WHEAT', 25)
         
-        # Need at least 1 wheat per animal, keep minimal buffer
-        needed = max(0, animals_count - wheat_available)
+        needed = max(0, animals_count * 2 - wheat_available)
         
-        if needed > 0 and wheat_price <= 60:  # Don't overpay
-            affordable = min(needed, int(budget // max(wheat_price, 1)))
+        if needed > 0 and wheat_price <= 60:
+            affordable = min(needed, int(budget[0] * 0.15 // max(wheat_price, 1)))
             if affordable > 0:
+                cost = affordable * wheat_price
                 orders.append(['BUY_PRODUCT', 'WHEAT', affordable])
+                budget[0] -= cost
         
         return orders
     
     def _buy_seed_orders(self, budget):
-        """Buy seeds based on game phase and available empty tiles.
-        
-        Key fix: Aggressively buy seeds to fill all available empty land."""
+        """Buy seeds based on ROI and available empty tiles.
+        Limit to what workers can actually plant.
+        budget is a mutable list [remaining_amount]."""
         orders = []
         s = self.state
         
@@ -128,81 +151,121 @@ class MarketManager:
         
         days_left = s.days_remaining
         
-        # Melon seeds — high value, prioritize these if early enough
-        melon_seeds = s.seeds.get('MELON', 0)
-        if melon_seeds < empty_count and days_left >= 12 and s.my_money >= 500:
-            buy_count = min(empty_count - melon_seeds, empty_count, 10)  # Buy up to 10
-            cost = CROP_DATA['MELON']['seed_cost'] * buy_count
-            if cost <= budget * 0.4:  # Higher budget allocation
-                orders.append(['BUY_SEED', 'MELON', buy_count])
-                budget -= cost
-                empty_count -= buy_count
-                
-        # Carrot seeds — fast cash
-        carrot_seeds = s.seeds.get('CARROT', 0)
-        if carrot_seeds < empty_count and days_left >= 3 and s.day < 25 and empty_count > 0:
-            buy_count = min(empty_count - carrot_seeds, empty_count, 10)
-            cost = CROP_DATA['CARROT']['seed_cost'] * buy_count
-            if cost <= budget * 0.2:
-                orders.append(['BUY_SEED', 'CARROT', buy_count])
-                budget -= cost
-                empty_count -= buy_count
+        # How many seeds can we actually plant? Limited by workers × hours left today
+        num_workers = 1 + len(s.hand_positions)
+        # Cap seed purchase to a reasonable amount relative to workers
+        max_seeds_to_buy = min(empty_count, num_workers * 4)  # ~4 plantings per worker per day
         
-        # Wheat seeds — our bread and butter, fill whatever is left
-        wheat_seeds = s.seeds.get('WHEAT', 0)
-        if wheat_seeds < empty_count and days_left >= 3 and empty_count > 0:
-            buy_count = min(empty_count - wheat_seeds, empty_count, 20)
-            cost = CROP_DATA['WHEAT']['seed_cost'] * buy_count
-            if cost <= budget * 0.3:
-                orders.append(['BUY_SEED', 'WHEAT', buy_count])
-                budget -= cost
+        # Count existing seeds
+        total_existing_seeds = sum(s.seeds.values())
+        # Don't buy more if we already have plenty
+        seeds_needed = max(0, max_seeds_to_buy - total_existing_seeds)
+        if seeds_needed <= 0:
+            return orders
+        
+        # ROI-driven seed purchasing
+        crop_rois = []
+        for crop_name, data in CROP_DATA.items():
+            if days_left < data['first_yield_day'] + 1:
+                continue
+            price = s.market_prices.get(crop_name, data['base_price'])
+            if data['yield_type'] == 'ongoing':
+                cycles = min(data['total_productions'],
+                           max(1, (days_left - data['first_yield_day']) // max(1, data['subsequent_interval']) + 1))
+                total_revenue = price * cycles
+            else:
+                total_revenue = price * data['max_yield']
+            days_occupied = min(days_left, data['first_yield_day'] + 1)
+            roi = (total_revenue - data['seed_cost']) / max(1, days_occupied)
+            crop_rois.append((roi, crop_name, data))
+        
+        crop_rois.sort(reverse=True)
+        
+        remaining_to_buy = seeds_needed
+        for roi, crop_name, data in crop_rois:
+            if remaining_to_buy <= 0 or roi <= 0 or budget[0] <= 0:
+                break
+            
+            existing_seeds = s.seeds.get(crop_name, 0)
+            
+            # Stagger melon purchases
+            if crop_name == 'MELON':
+                max_buy = min(2, remaining_to_buy)
+            elif crop_name in ('STRAWBERRY', 'TOMATO'):
+                max_buy = min(3, remaining_to_buy)
+            else:
+                max_buy = min(6, remaining_to_buy)
+            
+            buy_count = min(max_buy, max(0, remaining_to_buy - existing_seeds))
+            if buy_count <= 0:
+                continue
+            
+            cost = data['seed_cost'] * buy_count
+            if cost <= budget[0] * 0.5:  # Max 50% of remaining budget per crop type
+                orders.append(['BUY_SEED', crop_name, buy_count])
+                budget[0] -= cost
+                remaining_to_buy -= buy_count
         
         return orders
     
     def _buy_animal_orders(self, budget):
         """Buy animals if we have empty structures.
-        Focus on cows for best ongoing income."""
+        budget is a mutable list [remaining_amount]."""
         orders = []
         s = self.state
         
-        if s.days_remaining < 10:  # Animals need time to pay back
+        if s.days_remaining < 10:
             return orders
         
-        # Check for empty structures
         pastures = find_tiles_by_kind(s.my_tiles, 'PASTURE', s.unlocked_quadrants)
         empty_pastures = [p for p in pastures if p[2].get('animal') is None]
         
         coops = find_tiles_by_kind(s.my_tiles, 'COOP', s.unlocked_quadrants)
         empty_coops = [c for c in coops if c[2].get('animal') is None]
         
-        # Check shed for animals waiting to be placed
-        cows_in_shed = s.shed.get('COW', 0)
-        sheep_in_shed = s.shed.get('SHEEP', 0)
+        animals_in_shed = sum(s.shed.get(a, 0) for a in ('COW', 'SHEEP', 'GOOSE'))
+        
+        # ROI-based animal selection for pastures
+        if empty_pastures and animals_in_shed == 0:
+            animal_options = []
+            for animal_type in ('COW', 'SHEEP'):
+                data = ANIMAL_DATA[animal_type]
+                price = s.market_prices.get(data['product'], data['base_price'])
+                if s.days_remaining < data['first_yield_day'] + data['production_interval']:
+                    continue
+                harvests = (s.days_remaining - data['first_yield_day']) // data['production_interval'] + 1
+                revenue = price * harvests
+                roi_per_day = (revenue - data['cost']) / max(1, s.days_remaining)
+                animal_options.append((roi_per_day, animal_type, data))
+            
+            if animal_options:
+                animal_options.sort(reverse=True)
+                best_roi, best_animal, best_data = animal_options[0]
+                
+                needed = len(empty_pastures)
+                if needed > 0 and budget[0] >= best_data['cost'] * 1.5:
+                    affordable = min(needed, int(budget[0] * 0.3 // best_data['cost']))
+                    if affordable > 0:
+                        cost = affordable * best_data['cost']
+                        orders.append(['BUY_ANIMAL', best_animal, affordable])
+                        budget[0] -= cost
+        
+        # GOOSE for empty coops
         geese_in_shed = s.shed.get('GOOSE', 0)
-        
-        # Buy cows for empty pastures
-        cows_needed = max(0, len(empty_pastures) - cows_in_shed - sheep_in_shed)
-        if cows_needed > 0 and budget >= ANIMAL_DATA['COW']['cost'] * 1.5:
-            cow_cost = ANIMAL_DATA['COW']['cost']
-            affordable = min(cows_needed, int(budget * 0.4 // cow_cost))
-            if affordable > 0:
-                orders.append(['BUY_ANIMAL', 'COW', affordable])
-                budget -= affordable * cow_cost
-        
-        # Buy geese for empty coops
         geese_needed = max(0, len(empty_coops) - geese_in_shed)
-        if geese_needed > 0 and budget >= ANIMAL_DATA['GOOSE']['cost'] * 1.5:
+        if geese_needed > 0 and budget[0] >= ANIMAL_DATA['GOOSE']['cost'] * 1.5:
             goose_cost = ANIMAL_DATA['GOOSE']['cost']
-            affordable = min(geese_needed, int(budget * 0.3 // goose_cost))
+            affordable = min(geese_needed, int(budget[0] * 0.2 // goose_cost))
             if affordable > 0:
+                cost = affordable * goose_cost
                 orders.append(['BUY_ANIMAL', 'GOOSE', affordable])
-                budget -= affordable * goose_cost
+                budget[0] -= cost
         
         return orders
     
     def _hire_orders(self, budget):
         """Hire farm hands based on workload.
-        Hire at start of day when we have significant work."""
+        budget is a mutable list [remaining_amount]."""
         orders = []
         s = self.state
         
@@ -210,57 +273,87 @@ class MarketManager:
         if s.hour != 0:
             return orders
         
+        # Don't hire in last 2 days
+        if s.days_remaining <= 2:
+            return orders
+        
         # Calculate workload
         num_plants = s.num_plants()
         num_animals = s.num_animals()
-        total_work = num_plants + num_animals * 3  # animals need feed + care + harvest
+        total_work = num_plants + num_animals * 3
         
-        # Each worker can handle ~15-20 tasks per day
-        workers_needed = max(0, (total_work // 12) - 1)  # -1 for the farmer
+        # Also factor in seeds we have — we'll need workers to plant them
+        total_seeds = sum(s.seeds.values())
+        total_work += total_seeds
         
-        # Cap at 3 hands (avoid spawn trap + diminishing returns)
-        workers_needed = min(workers_needed, 3)
+        # Each worker can handle ~12 tasks per day
+        target_hands = max(0, (total_work // 12))
         
-        # Don't hire in last 2 days
-        if s.days_remaining <= 2:
-            workers_needed = 0
-        elif s.days_remaining <= 5:
-            workers_needed = min(workers_needed, 1)
+        # Subtract current headcount
+        current_hands = len(s.hand_positions)
+        new_hires_needed = max(0, target_hands - current_hands)
         
-        for i in range(workers_needed):
+        # Cap to avoid over-hiring
+        new_hires_needed = min(new_hires_needed, 4 - current_hands)  # Max 4 hands total
+        
+        # In last 5 days, only hire 1 max
+        if s.days_remaining <= 5:
+            new_hires_needed = min(new_hires_needed, 1)
+        
+        # Spread hiring: max 2 per day to keep Fibonacci cost low
+        new_hires_needed = min(new_hires_needed, 2)
+        
+        # On day 0, always hire at least 1 hand if we can afford it
+        if s.day == 0 and current_hands == 0:
+            new_hires_needed = max(new_hires_needed, 1)
+        
+        for i in range(new_hires_needed):
             cost = farmhand_cost(s.hires_today + i)
-            if cost <= budget * 0.05:  # Max 5% of budget per hand
+            if cost <= budget[0] * 0.15:  # Max 15% of budget per hire
                 orders.append(['HIRE'])
-                budget -= cost
+                budget[0] -= cost
         
         return orders
     
     def _buy_land_orders(self, budget):
-        """Buy new land quadrants when we have enough money and tiles.
-        Only buy early enough to get ROI."""
+        """Buy new land quadrants based on ROI comparison.
+        budget is a mutable list [remaining_amount]."""
         orders = []
         s = self.state
         
-        quadrants_bought = len(s.unlocked_quadrants) - 1  # NW is free
-        if quadrants_bought >= 3:  # All 4 quadrants owned
+        quadrants_bought = len(s.unlocked_quadrants) - 1
+        if quadrants_bought >= 3:
             return orders
         
-        # Check if current land is well-utilized (>60% used)
-        empty_count = len(find_empty_tiles(s.my_tiles, s.unlocked_quadrants))
-        total_unlocked = len(s.unlocked_quadrants) * 25
-        utilization = 1.0 - (empty_count / max(total_unlocked, 1))
-        
-        # Only buy if current land is >50% utilized AND we have money AND enough time
-        if utilization < 0.5:
-            return orders
-        
-        if s.days_remaining < 12:
+        if s.days_remaining < 10:
             return orders
         
         cost = LAND_COSTS[quadrants_bought]
         
-        # Buy if we can afford it with money to spare
-        if budget >= cost + 500:  # Keep $500 for operations
+        # ROI gate
+        best_roi = 0
+        for crop_name, data in CROP_DATA.items():
+            if s.days_remaining < data['first_yield_day'] + 1:
+                continue
+            price = s.market_prices.get(crop_name, data['base_price'])
+            if data['yield_type'] == 'ongoing':
+                cycles = min(data['total_productions'],
+                           max(1, (s.days_remaining - data['first_yield_day']) // max(1, data['subsequent_interval']) + 1))
+                total_revenue = price * cycles
+            else:
+                total_revenue = price * data['max_yield']
+            days_occupied = min(s.days_remaining, data['first_yield_day'] + 1)
+            roi = (total_revenue - data['seed_cost']) / max(1, days_occupied)
+            best_roi = max(best_roi, roi)
+        
+        expected_profit = 25 * best_roi * s.days_remaining * 0.4
+        
+        empty_count = len(find_empty_tiles(s.my_tiles, s.unlocked_quadrants))
+        total_unlocked = len(s.unlocked_quadrants) * 25
+        utilization = 1.0 - (empty_count / max(total_unlocked, 1))
+        
+        if expected_profit > cost * 1.5 and utilization > 0.4 and budget[0] >= cost + 500:
             orders.append(['BUY_LAND'])
+            budget[0] -= cost
         
         return orders
