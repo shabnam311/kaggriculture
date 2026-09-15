@@ -338,7 +338,12 @@ def make_tasks(s):
                 st = min(shed_t, key=lambda p: _dist(wpos, p))
                 # Base priority on total value being carried
                 base_pri = 25 + min(35, val // 50)
-                pri = 75 if s.days_left <= 3 else base_pri
+                if s.days_left <= 1:
+                    pri = 99
+                elif s.days_left <= 3:
+                    pri = 75
+                else:
+                    pri = base_pri
                 tasks.append((pri, st, ['DROP'], f'drop_w{i}'))
 
     # --- DIG weeds ---
