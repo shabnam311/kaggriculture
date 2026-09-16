@@ -238,6 +238,17 @@ def make_tasks(s):
             if s.day - placed >= yd:
                 tasks.append((80, (x, y), ['HARVEST'], 'harvest_a'))
 
+    # --- BUILD structures (scale with land owned, reserve tiles before planting) ---
+    if s.days_left >= 10 and s.money >= 450:
+        pastures = s.count_structs('PASTURE')
+        coops = s.count_structs('COOP')
+        target_past = len(s.qs) * 2
+        target_coop = len(s.qs)
+        if pastures < target_past and empties:
+            tasks.append((65, empties.pop(-1), ['BUILD_PASTURE'], 'build_past'))
+        if coops < target_coop and empties:
+            tasks.append((63, empties.pop(-1), ['BUILD_COOP'], 'build_coop'))
+
     # --- PLANT seeds ---
     best_crops = _rank_crops_for_planting(s)
     planted_count = 0
@@ -250,17 +261,6 @@ def make_tasks(s):
             pri = 55 if crop_name in ('WHEAT','CARROT') else 45
             tasks.append((pri, pos, ['PLANT', crop_name], f'plant_{crop_name}'))
             planted_count += 1
-
-    # --- BUILD structures (scale with land owned) ---
-    if s.days_left >= 10 and s.money >= 450:
-        pastures = s.count_structs('PASTURE')
-        coops = s.count_structs('COOP')
-        target_past = len(s.qs) * 2
-        target_coop = len(s.qs)
-        if pastures < target_past and empties:
-            tasks.append((60, empties.pop(-1), ['BUILD_PASTURE'], 'build_past'))
-        if coops < target_coop and empties:
-            tasks.append((58, empties.pop(-1), ['BUILD_COOP'], 'build_coop'))
 
     # --- PLACE animals from inventory onto empty structures ---
     for i, inv in enumerate(s.invs):
