@@ -199,6 +199,11 @@ def make_tasks(s):
                 tasks.append((pri + uf*5, (x, y), ['FEED'], 'feed')) # Scale priority
                 fed += 1
 
+    # --- CARE animals ---
+    for x, y, t in s.iter_tiles():
+        if t.get('kind') in ('COOP','PASTURE') and t.get('animal') and not t.get('cared_today', False):
+            tasks.append((48, (x, y), ['CARE'], 'care'))
+
     # --- FERTILIZE high value crops ---
     fert_avail = s.shed.get('FERTILIZER', 0)
     for inv in s.invs:
