@@ -605,10 +605,18 @@ def _terminal_liquidation(obs, action, step):
     for order in action.get("market", []):
         if _is_sell(order):
             planned[str(order[1])] += max(0, int(order[2]))
-    for item in _LIQUIDATION_ORDER:
+    
+    candidates = []
+    for item in _SELLABLE:
         available = max(0, int(_get(shed, item, 0) or 0))
         extra = available if step >= 718 else max(0, available - planned[item])
-        if extra and len(action["market"]) < 10:
+        if extra:
+            score = _order_score(obs, None, ["SELL", item, extra])
+            candidates.append((score, item, extra))
+            
+    candidates.sort(reverse=True, key=lambda x: x[0])
+    for _, item, extra in candidates:
+        if len(action["market"]) < 10:
             action["market"].append(["SELL", item, extra])
     return action
 
